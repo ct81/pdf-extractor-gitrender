@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Python PDF Coordinate & CAD Schedule Extractor</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <style>
+    :root { --primary: #1f4e78; --accent: #27ae60; --bg: #f4f7f9; --border: #dcdfe6; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: #333; margin: 0; padding: 20px; }
+    .container { max-width: 1300px; margin: 0 auto; background: #fff; padding: 24px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.06); }
+    h1 { margin-top: 0; color: var(--primary); font-size: 1.5rem; }
+    .upload-zone { border: 2px dashed var(--primary); background: #f0f4f8; padding: 24px; text-align: center; border-radius: 8px; cursor: pointer; margin-bottom: 20px; }
+    .upload-zone:hover { background: #e4ecf3; }
+    input[type="file"] { display: none; }
+    .btn { padding: 10px 20px; border: none; border-radius: 5px; font-weight: bold; cursor: pointer; color: white; background: var(--accent); }
+    .btn:disabled { background: #ccc; cursor: not-allowed; }
+    #status { font-weight: 600; padding: 10px 14px; background: #f1f5f9; border-radius: 4px; border-left: 4px solid var(--primary); margin-bottom: 20px; }
+    .table-container { max-height: 500px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    th, td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; white-space: pre-line; }
+    th { background: var(--primary); color: white; position: sticky; top: 0; }
+    tr:nth-child(even) { background: #f8fafc; }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <h1>Python PDF Coordinate & CAD Schedule Extractor</h1>
+  <p>Upload a PDF drawing. The backend processes vector matrices via Python (FastAPI + pdfplumber) hosted on Render.</p>
+
+  <div class="upload-zone" onclick="document.getElementById('pdf-file').click()">
+    <span id="upload-label">📄 Click or Drag & Drop PDF File Here</span>
+    <input type="file" id="pdf-file" accept="application/pdf">
+  </div>
+
+  <div style="margin-bottom: 20px;">
+    <button id="export-btn" class="btn" disabled>📥 Export Multi-Tab Excel (.xlsx)</button>
+  </div>
+
+  <div id="status">Status: Waiting for PDF upload...</div>
+
+  <div class="table-container">
+    <table>
+      <thead>
+        <tr>
+          <th>Word #</th>
+          <th>Text String</th>
+          <th>X0 (Left)</th>
+          <th>Top (Y)</th>
+          <th>X1 (Right)</th>
+          <th>Bottom (Y)</th>
+        </tr>
+      </thead>
+      <tbody id="table-body">
+        <tr><td colspan="6" style="text-align: center; padding: 20px;">Upload a PDF file to extract raw coordinates.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+  // UPDATE THIS WITH YOUR LIVE RENDER BACKEND ENDPOINT
+  const RENDER_API_URL = "https://pdf-table-extractor-backend.onrender.com/extract-coordinates";
+
+  let extractedData = null;
+  const fileInput = document.getElementById('pdf-file');
+  const exportBtn = document.getElementById('export-btn');
+  const statusDiv = document.getElementById('status');
+
+  fileInput.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    document.getElementById('upload-label').textContent = `Loaded File: ${file.name}`;
+    statusDiv.textContent = "Uploading to Render Python API... (First cold start on free Render tier takes ~30s)";
+
+    const formData = new FormData();
+    formData.append("file", file);
+
+    try {
+      const response = await fetch(RENDER_API_URL, { method: "POST", body: formData });
+      if (!response.ok) throw new Error(`HTTP Error Status: ${response.status}`);
+
+      const result = await response.json();
+      extractedData = result;
+
+      renderTable(result);
+      exportBtn.disabled = false;
+      statusDiv.textContent = `Success! Extracted ${result.pages[0].raw_words_count} coordinate words across ${result.total_pages} page(s).`;
+    } catch (err) {
+      statusDiv.textContent = `Error: ${err.message}. Make sure your Render backend is deployed and active.`;
+    }
+  });
+
+  function renderTable(data) {
+    const tbody = document.getElementById('table-body');
+    tbody.innerHTML = '';
+    const words = data.pages[0].words;
+
+    words.slice(0, 150).forEach((w, idx) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${idx + 1}</td>
+        <td><strong>${w.text}</strong></td>
+        <td>${w.x0}</td>
+        <td>${w.top}</td>
+        <td>${w.x1}</td>
+        <td>${w.bottom}</td>
+      `;
+      tbody.appendChild(tr);
+    });
+  }
+
+  exportBtn.addEventListener('click', () => {
+    if (!extractedData) return;
+
+    const wb = XLSX.utils.book_new();
+    const words = extractedData.pages[0].words;
+
+    // Sheet 1: Raw Coordinates
+    const matrix = [["Index", "Text", "X0_Left", "Top_Y", "X1_Right", "Bottom_Y", "Width", "Height"]];
+    words.forEach((w, idx) => {
+      matrix.push([idx + 1, w.text, w.x0, w.top, w.x1, w.bottom, w.width, w.height]);
+    });
+
+    const wsRaw = XLSX.utils.aoa_to_sheet(matrix);
+    XLSX.utils.book_append_sheet(wb, wsRaw, "Raw_Coordinates");
+
+    // Sheet 2: JSON Records
+    const jsonRows = [["Row_ID", "JSON_Record"]];
+    words.forEach((w, idx) => {
+      jsonRows.push([idx + 1, JSON.stringify(w)]);
+    });
+
+    const wsJSON = XLSX.utils.aoa_to_sheet(jsonRows);
+    XLSX.utils.book_append_sheet(wb, wsJSON, "JSON_Data");
+
+    XLSX.writeFile(wb, `${extractedData.filename}_Python_Coordinates.xlsx`);
+  });
+</script>
+
+</body>
+</html>
