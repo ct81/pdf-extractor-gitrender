@@ -1,7 +1,7 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-import pdfplumber
 import io
+import fitz  # PyMuPDF
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="High-Precision Dynamic PDF Coordinates Extractor API")
 
@@ -14,13 +14,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.get("/")
 def root():
-    return {"status": "online", "message": "Python PDF Extractor Backend running on Render"}
+    return {
+        "status": "online",
+        "message": "Python PyMuPDF Extractor Backend running",
+    }
 
-def build_dynamic_coordinate_matrix(words, x_gap_threshold=35, y_gap_threshold=8):
-    """
-    Dynamically clusters extracted X,Y word coordinates into a 2D matrix 
+
+def build_dynamic_coordinate_matrix(
+    words, x_gap_threshold=35, y_gap_threshold=8
+):
+    """Dynamically clusters extracted X,Y word coordinates into a 2D matrix
+
     table grid without hardcoded pixel boundaries or static column names.
     """
     if not words:
@@ -38,7 +45,9 @@ def build_dynamic_coordinate_matrix(words, x_gap_threshold=35, y_gap_threshold=8
                 break
         if matched:
             matched["count"] += 1
-            matched["mean"] = ((matched["mean"] * (matched["count"] - 1)) + x) / matched["count"]
+            matched["mean"] = (
+                (matched["mean"] * (matched["count"] - 1)) + x
+            ) / matched["count"]
             matched["min_x"] = min(matched["min_x"], x)
             matched["max_x"] = max(matched["max_x"], x)
         else:
@@ -81,71 +90,274 @@ def build_dynamic_coordinate_matrix(words, x_gap_threshold=35, y_gap_threshold=8
             else:
                 row_cells[best_col_idx] += " " + w["text"]
 
-        matrix_rows.append({
-            "row_id": r_idx + 1,
-            "y_top": round(r["top"], 2),
-            "cells": row_cells
-        })
+        matrix_rows.append(
+            {
+                "row_id": r_idx + 1,
+                "y_top": round(r["top"], 2),
+                "cells": row_cells,
+            }
+        )
 
     return {
         "total_columns": len(columns),
         "column_anchors": [round(c["mean"], 2) for c in columns],
-        "rows": matrix_rows
+        "rows": matrix_rows,
     }
+
 
 @app.post("/extract-coordinates")
 async def extract_coordinates(file: UploadFile = File(...)):
     if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+        raise HTTPException(
+            status_code=400, detail="Only PDF files are supported."
+        )
 
     try:
         pdf_bytes = await file.read()
         extracted_pages = []
 
-        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-            for page_idx, page in enumerate(pdf.pages):
-                # 1. High-precision word coordinate extraction
-                words = page.extract_words(
-                    x_tolerance=2,
-                    y_tolerance=3,
-                    keep_blank_chars=False
+        # Open byte stream directly using PyMuPDF
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+        for page_idx, page in enumerate(doc):
+            rect = page.rect
+
+            # 1. High-precision word extraction via PyMuPDF
+            # page.get_text("words") returns tuples: (x0, y0, x1, y1, word, block_no, line_no, word_no)
+            raw_words = page.get_text("words")
+
+            words_data = []
+            for w in raw_words:
+                x0, y0, x1, y1, text, block_no, line_no, word_no = w
+                words_data.append(
+                    {
+                        "text": text,
+                        "x0": round(x0, 2),
+                        "top": round(y0, 2),
+                        "x1": round(x1, 2),
+                        "bottom": round(y1, 2),
+                        "width": round(x1 - x0, 2),
+                        "height": round(y1 - y0, 2),
+                        "block_no": block_no,
+                        "line_no": line_no,
+                    }
                 )
 
-                words_data = []
-                for w in words:
-                    words_data.append({
-                        "text": w["text"],
-                        "x0": round(w["x0"], 2),
-                        "top": round(w["top"], 2),
-                        "x1": round(w["x1"], 2),
-                        "bottom": round(w["bottom"], 2),
-                        "width": round(w["width"], 2),
-                        "height": round(w["height"], 2)
-                    })
+            # 2. Extract block structures (blocks: x0, y0, x1, y1, text, block_no, block_type)
+            raw_blocks = page.get_text("blocks")
+            blocks_data = []
+            for b in raw_blocks:
+                if (
+                    b[6] == 0
+                ):  # Filter for text blocks (type 0 = text, type 1 = image)
+                    blocks_data.append(
+                        {
+                            "bbox": [
+                                round(b[0], 2),
+                                round(b[1], 2),
+                                round(b[2], 2),
+                                round(b[3], 2),
+                            ],
+                            "text": b[4].strip(),
+                            "block_no": b[5],
+                        }
+                    )
 
-                # 2. Extract vector tables & construct dynamic spatial coordinate grid
-                tables = page.extract_tables()
-                spatial_grid = build_dynamic_coordinate_matrix(words_data)
+            # 3. Extract built-in tables (requires PyMuPDF 1.23.0+)
+            try:
+                found_tables = page.find_tables()
+                extracted_tables = (
+                    [t.extract() for t in found_tables] if found_tables else []
+                )
+            except Attribute:
+                extracted_tables = []
 
-                extracted_pages.append({
+            # 4. Construct dynamic spatial coordinate grid
+            spatial_grid = build_dynamic_coordinate_matrix(words_data)
+
+            extracted_pages.append(
+                {
                     "page_number": page_idx + 1,
-                    "width": round(page.width, 2),
-                    "height": round(page.height, 2),
+                    "width": round(rect.width, 2),
+                    "height": round(rect.height, 2),
                     "raw_words_count": len(words_data),
+                    "blocks": blocks_data,
                     "words": words_data,
-                    "tables": tables,
-                    "spatial_grid": spatial_grid
-                })
+                    "tables": extracted_tables,
+                    "spatial_grid": spatial_grid,
+                }
+            )
+
+        doc.close()
 
         return {
             "status": "success",
             "filename": file.filename,
             "total_pages": len(extracted_pages),
-            "pages": extracted_pages
+            "pages": extracted_pages,
         }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+
+
+
+
+
+# from fastapi import FastAPI, UploadFile, File, HTTPException
+# from fastapi.middleware.cors import CORSMiddleware
+# import pdfplumber
+# import io
+
+# app = FastAPI(title="High-Precision Dynamic PDF Coordinates Extractor API")
+
+# # Enable CORS for cross-origin web requests
+# app.add_middleware(
+#     CORSMiddleware,
+#     allow_origins=["*"],
+#     allow_credentials=True,
+#     allow_methods=["*"],
+#     allow_headers=["*"],
+# )
+
+# @app.get("/")
+# def root():
+#     return {"status": "online", "message": "Python PDF Extractor Backend running on Render"}
+
+# def build_dynamic_coordinate_matrix(words, x_gap_threshold=35, y_gap_threshold=8):
+#     """
+#     Dynamically clusters extracted X,Y word coordinates into a 2D matrix 
+#     table grid without hardcoded pixel boundaries or static column names.
+#     """
+#     if not words:
+#         return {"total_columns": 0, "column_anchors": [], "rows": []}
+
+#     # 1. Cluster X-coordinates into Dynamic Column Anchors
+#     x_positions = sorted([w["x0"] for w in words])
+#     columns = []
+
+#     for x in x_positions:
+#         matched = None
+#         for col in columns:
+#             if abs(col["mean"] - x) <= x_gap_threshold:
+#                 matched = col
+#                 break
+#         if matched:
+#             matched["count"] += 1
+#             matched["mean"] = ((matched["mean"] * (matched["count"] - 1)) + x) / matched["count"]
+#             matched["min_x"] = min(matched["min_x"], x)
+#             matched["max_x"] = max(matched["max_x"], x)
+#         else:
+#             columns.append({"mean": x, "min_x": x, "max_x": x, "count": 1})
+
+#     columns.sort(key=lambda c: c["mean"])
+
+#     # 2. Cluster Y-coordinates into Row Bands (Top-to-Bottom)
+#     sorted_words = sorted(words, key=lambda w: (w["top"], w["x0"]))
+#     rows = []
+
+#     for w in sorted_words:
+#         matched_row = None
+#         for r in rows:
+#             if abs(r["top"] - w["top"]) <= y_gap_threshold:
+#                 matched_row = r
+#                 break
+#         if matched_row:
+#             matched_row["words"].append(w)
+#         else:
+#             rows.append({"top": w["top"], "words": [w]})
+
+#     # 3. Project Words into Matrix Grid
+#     matrix_rows = []
+#     for r_idx, r in enumerate(rows):
+#         row_cells = ["" for _ in range(len(columns))]
+#         r["words"].sort(key=lambda w: w["x0"])
+
+#         for w in r["words"]:
+#             best_col_idx = 0
+#             min_dist = float("inf")
+#             for c_idx, c in enumerate(columns):
+#                 dist = abs(c["mean"] - w["x0"])
+#                 if dist < min_dist:
+#                     min_dist = dist
+#                     best_col_idx = c_idx
+
+#             if row_cells[best_col_idx] == "":
+#                 row_cells[best_col_idx] = w["text"]
+#             else:
+#                 row_cells[best_col_idx] += " " + w["text"]
+
+#         matrix_rows.append({
+#             "row_id": r_idx + 1,
+#             "y_top": round(r["top"], 2),
+#             "cells": row_cells
+#         })
+
+#     return {
+#         "total_columns": len(columns),
+#         "column_anchors": [round(c["mean"], 2) for c in columns],
+#         "rows": matrix_rows
+#     }
+
+# @app.post("/extract-coordinates")
+# async def extract_coordinates(file: UploadFile = File(...)):
+#     if not file.filename.lower().endswith(".pdf"):
+#         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+
+#     try:
+#         pdf_bytes = await file.read()
+#         extracted_pages = []
+
+#         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+#             for page_idx, page in enumerate(pdf.pages):
+#                 # 1. High-precision word coordinate extraction
+#                 words = page.extract_words(
+#                     x_tolerance=2,
+#                     y_tolerance=3,
+#                     keep_blank_chars=False
+#                 )
+
+#                 words_data = []
+#                 for w in words:
+#                     words_data.append({
+#                         "text": w["text"],
+#                         "x0": round(w["x0"], 2),
+#                         "top": round(w["top"], 2),
+#                         "x1": round(w["x1"], 2),
+#                         "bottom": round(w["bottom"], 2),
+#                         "width": round(w["width"], 2),
+#                         "height": round(w["height"], 2)
+#                     })
+
+#                 # 2. Extract vector tables & construct dynamic spatial coordinate grid
+#                 tables = page.extract_tables()
+#                 spatial_grid = build_dynamic_coordinate_matrix(words_data)
+
+#                 extracted_pages.append({
+#                     "page_number": page_idx + 1,
+#                     "width": round(page.width, 2),
+#                     "height": round(page.height, 2),
+#                     "raw_words_count": len(words_data),
+#                     "words": words_data,
+#                     "tables": tables,
+#                     "spatial_grid": spatial_grid
+#                 })
+
+#         return {
+#             "status": "success",
+#             "filename": file.filename,
+#             "total_pages": len(extracted_pages),
+#             "pages": extracted_pages
+#         }
+
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=str(e))
+
+
+
+
 
 
 # from fastapi import FastAPI, UploadFile, File, HTTPException
