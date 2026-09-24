@@ -2,10 +2,8 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import pdfplumber
 import io
-import re
-from collections import defaultdict
 
-app = FastAPI(title="Dynamic Zero-Hardcoded PDF Coordinates Extractor API")
+app = FastAPI(title="High-Precision Dynamic PDF Coordinates Extractor API")
 
 # Enable CORS for cross-origin web requests
 app.add_middleware(
@@ -18,80 +16,37 @@ app.add_middleware(
 
 @app.get("/")
 def root():
-    return {"status": "online", "message": "Zero-Hardcoded PDF Extractor Backend running on Render"}
+    return {"status": "online", "message": "Python PDF Extractor Backend running on Render"}
 
-def detect_cad_keywords_dynamically(text):
+def build_dynamic_coordinate_matrix(words, x_gap_threshold=35, y_gap_threshold=8):
     """
-    Dynamically identifies potential header/parameter keys from text 
-    by detecting repeating UPPERCASE or TitleCase keywords preceding values.
-    """
-    lines = [line.strip() for line in text.split("\n") if line.strip()]
-    potential_keys = set()
-    
-    for line in lines:
-        # Match leading word groups that look like table labels (e.g., ARRANGEMENT, MAIN BAR, SIZE)
-        matches = re.findall(r'^[A-Z0-9\s/_\-]{2,20}(?=\s|\d|[a-z]|$)', line)
-        for m in matches:
-            m_clean = m.strip()
-            if len(m_clean) > 2 and not m_clean.isdigit():
-                potential_keys.add(m_clean)
-                
-    return sorted(list(potential_keys), key=len, reverse=True)
-
-def parse_cad_stream_dynamic(text_block):
-    """
-    Dynamically parses concatenated CAD stream blocks without hardcoding key names.
-    """
-    keys = detect_cad_keywords_dynamically(text_block)
-    if not keys:
-        return []
-
-    regex_pattern = f"({'|'.join(re.escape(k) for k in keys)})"
-    parts = re.split(regex_pattern, text_block)
-    
-    parsed = []
-    if len(parts) > 1:
-        for i in range(1, len(parts), 2):
-            key = parts[i]
-            val_str = parts[i+1] if i+1 < len(parts) else ""
-            # Tokenize values dynamically
-            tokens = [t.strip() for t in re.split(r'\s{2,}|\n|,', val_str) if t.strip()]
-            if not tokens:
-                tokens = [val_str.strip()]
-            parsed.append({"key": key, "tokens": tokens})
-    return parsed
-
-def build_dynamic_spatial_matrix(words, x_gap_threshold=25, y_gap_threshold=6):
-    """
-    Dynamically clusters X-column centers and Y-row bands using 1D Mean-Shift clustering.
-    Zero hardcoded coordinates or column names.
+    Dynamically clusters extracted X,Y word coordinates into a 2D matrix 
+    table grid without hardcoded pixel boundaries or static column names.
     """
     if not words:
-        return []
+        return {"total_columns": 0, "column_anchors": [], "rows": []}
 
-    # 1. Dynamic Column Center Detection (X-axis Mean-Shift Clustering)
+    # 1. Cluster X-coordinates into Dynamic Column Anchors
     x_positions = sorted([w["x0"] for w in words])
     columns = []
 
     for x in x_positions:
-        matched_col = None
+        matched = None
         for col in columns:
             if abs(col["mean"] - x) <= x_gap_threshold:
-                matched_col = col
+                matched = col
                 break
-        
-        if matched_col:
-            matched_col["count"] += 1
-            matched_col["mean"] = ((matched_col["mean"] * (matched_col["count"] - 1)) + x) / matched_col["count"]
-            matched_col["min_x"] = min(matched_col["min_x"], x)
-            matched_col["max_x"] = max(matched_col["max_x"], x)
+        if matched:
+            matched["count"] += 1
+            matched["mean"] = ((matched["mean"] * (matched["count"] - 1)) + x) / matched["count"]
+            matched["min_x"] = min(matched["min_x"], x)
+            matched["max_x"] = max(matched["max_x"], x)
         else:
             columns.append({"mean": x, "min_x": x, "max_x": x, "count": 1})
 
-    # Sort columns strictly left-to-right
     columns.sort(key=lambda c: c["mean"])
 
-    # 2. Dynamic Row Banding (Y-axis Top-to-Bottom Grouping)
+    # 2. Cluster Y-coordinates into Row Bands (Top-to-Bottom)
     sorted_words = sorted(words, key=lambda w: (w["top"], w["x0"]))
     rows = []
 
@@ -101,28 +56,24 @@ def build_dynamic_spatial_matrix(words, x_gap_threshold=25, y_gap_threshold=6):
             if abs(r["top"] - w["top"]) <= y_gap_threshold:
                 matched_row = r
                 break
-
         if matched_row:
             matched_row["words"].append(w)
         else:
             rows.append({"top": w["top"], "words": [w]})
 
-    # 3. Project Words into Dynamic Matrix
-    matrix = []
+    # 3. Project Words into Matrix Grid
+    matrix_rows = []
     for r_idx, r in enumerate(rows):
         row_cells = ["" for _ in range(len(columns))]
-        
-        # Sort words in row left-to-right
         r["words"].sort(key=lambda w: w["x0"])
 
         for w in r["words"]:
-            # Find closest dynamic column
             best_col_idx = 0
             min_dist = float("inf")
             for c_idx, c in enumerate(columns):
                 dist = abs(c["mean"] - w["x0"])
                 if dist < min_dist:
-                    min_dist = dist;
+                    min_dist = dist
                     best_col_idx = c_idx
 
             if row_cells[best_col_idx] == "":
@@ -130,16 +81,16 @@ def build_dynamic_spatial_matrix(words, x_gap_threshold=25, y_gap_threshold=6):
             else:
                 row_cells[best_col_idx] += " " + w["text"]
 
-        matrix.append({
-            "row_index": r_idx + 1,
+        matrix_rows.append({
+            "row_id": r_idx + 1,
             "y_top": round(r["top"], 2),
             "cells": row_cells
         })
 
     return {
-        "detected_columns_count": len(columns),
+        "total_columns": len(columns),
         "column_anchors": [round(c["mean"], 2) for c in columns],
-        "matrix_rows": matrix
+        "rows": matrix_rows
     }
 
 @app.post("/extract-coordinates")
@@ -153,7 +104,7 @@ async def extract_coordinates(file: UploadFile = File(...)):
 
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             for page_idx, page in enumerate(pdf.pages):
-                # 1. Extract raw words with exact bounding box coordinates
+                # 1. High-precision word coordinate extraction
                 words = page.extract_words(
                     x_tolerance=2,
                     y_tolerance=3,
@@ -172,15 +123,9 @@ async def extract_coordinates(file: UploadFile = File(...)):
                         "height": round(w["height"], 2)
                     })
 
-                # 2. Extract native PDF vector tables
+                # 2. Extract vector tables & construct dynamic spatial coordinate grid
                 tables = page.extract_tables()
-
-                # 3. Dynamic Spatial Matrix Construction (Zero Hardcoding)
-                spatial_grid = build_dynamic_spatial_matrix(words_data)
-
-                # 4. Dynamic CAD Stream Text Parsing
-                raw_text_full = page.extract_text() or ""
-                cad_parsed = parse_cad_stream_dynamic(raw_text_full)
+                spatial_grid = build_dynamic_coordinate_matrix(words_data)
 
                 extracted_pages.append({
                     "page_number": page_idx + 1,
@@ -189,7 +134,6 @@ async def extract_coordinates(file: UploadFile = File(...)):
                     "raw_words_count": len(words_data),
                     "words": words_data,
                     "tables": tables,
-                    "cad_parsed": cad_parsed,
                     "spatial_grid": spatial_grid
                 })
 
