@@ -285,11 +285,26 @@ def build_storey_marking_pivot(spatial_grid):
     return pivot_rows
 
 
+def extract_words_via_ocr(page, dpi=200, language="eng"):
+    """OCR fallback for scanned/image-only pages with no extractable text layer.
+    Requires the system Tesseract-OCR engine + language data (TESSDATA_PREFIX);
+    returns an empty result and the error message if OCR is unavailable.
+    """
+    try:
+        textpage = page.get_textpage_ocr(
+            flags=fitz.TEXTFLAGS_WORDS, full=True, dpi=dpi, language=language
+        )
+        return page.get_text("words", textpage=textpage), None
+    except Exception as exc:
+        return [], str(exc)
+
+
 @app.post("/extract-coordinates")
 async def extract_coordinates(
     file: UploadFile = File(...),
     x_gap_threshold: float = Form(35.0),
     y_gap_threshold: float = Form(8.0),
+    enable_ocr: bool = Form(True),
 ):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(
@@ -309,6 +324,13 @@ async def extract_coordinates(
             # 1. High-precision word extraction via PyMuPDF
             # page.get_text("words") returns tuples: (x0, y0, x1, y1, word, block_no, line_no, word_no)
             raw_words = page.get_text("words")
+
+            # 1b. OCR fallback for scanned/image-only pages with no text layer
+            used_ocr = False
+            ocr_error = None
+            if not raw_words and enable_ocr:
+                raw_words, ocr_error = extract_words_via_ocr(page)
+                used_ocr = bool(raw_words)
 
             words_data = []
             for w in raw_words:
@@ -370,6 +392,8 @@ async def extract_coordinates(
                     "width": round(rect.width, 2),
                     "height": round(rect.height, 2),
                     "raw_words_count": len(words_data),
+                    "used_ocr": used_ocr,
+                    "ocr_error": ocr_error,
                     "blocks": blocks_data,
                     "words": words_data,
                     "tables": extracted_tables,
