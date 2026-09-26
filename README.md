@@ -4,11 +4,15 @@ Full-stack Python FastAPI backend + HTML/JS frontend for high-precision PDF coor
 
 ## Deployment Steps
 
-1. Create a GitHub Repository and push these files.
+1. Create a GitHub Repository and push these files (including the `Dockerfile`).
 2. Sign in to [Render.com](https://render.com).
-3. Click **New +** -> **Web Service** (or **Blueprint**).
+3. Click **New +** -> **Blueprint** (recommended, reads `render.yaml`) or **Web Service**.
 4. Connect your GitHub repository.
-5. Render will automatically build using `requirements.txt` and start the server using `main.py`.
+5. Render builds and runs the service from the `Dockerfile` (`env: docker` in `render.yaml`),
+   which installs Tesseract as part of the image build and starts `main.py` via `uvicorn`.
+
+   If you create the Web Service manually instead of via Blueprint, set its **Environment** to
+   **Docker** so Render uses the `Dockerfile` instead of the native Python buildpack.
 
 ## OCR Support (scanned / image-only PDFs, or CAD text drawn as vector paths)
 
@@ -19,9 +23,10 @@ real text layer at all, so PyMuPDF's normal text extraction returns nothing for 
 - **When it runs:** automatically for any page with no extractable text layer, or on every page
   if you enable "Always OCR (ignore embedded text)" in the frontend (`force_ocr=true`), which is
   the option to use for drawings where the schedule grid itself has no real text objects.
-- **Render:** `render.yaml` installs `tesseract-ocr` via `apt-get` during the build. If your
-  Render plan/image blocks `apt-get` in `buildCommand`, switch to a Docker-based Render service
-  with a Dockerfile that installs `tesseract-ocr`.
+- **Render:** deployment must use the **Docker** environment (see Deployment Steps above), which
+  builds from the `Dockerfile` and installs `tesseract-ocr` as root. Render's native `env: python`
+  buildpack runs `buildCommand` as a non-root user, so `apt-get install` silently fails there and
+  the API responds with `used_ocr: false` / `ocr_error: "tesseract is not installed..."`.
 - **Local dev:** install it with `sudo apt-get install tesseract-ocr` (Debian/Ubuntu) or the
   equivalent for your OS, then restart `uvicorn`.
 - OCR can be disabled entirely by sending `enable_ocr=false`. If OCR is requested but Tesseract
