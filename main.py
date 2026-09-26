@@ -1,11 +1,20 @@
 import io
+import logging
 import re
+import time
+import uuid
 
 import pymupdf  # PyMuPDF
 import pytesseract
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger("pdf_extractor")
 
 # Row-label tokens used to recognize a storey/level, e.g. "30TH", "1ST STY. FL. LVL",
 # "UPPER ROOF", "FOUNDATION BASE" — these drawings label storeys as ROW headers,
@@ -363,7 +372,20 @@ async def extract_coordinates(
     enable_ocr: bool = Form(True),
     force_ocr: bool = Form(False),
 ):
+    request_id = uuid.uuid4().hex[:8]
+    started_at = time.perf_counter()
+    logger.info(
+        "extraction_started request_id=%s filename=%s x_gap=%.2f y_gap=%.2f enable_ocr=%s force_ocr=%s",
+        request_id,
+        file.filename,
+        x_gap_threshold,
+        y_gap_threshold,
+        enable_ocr,
+        force_ocr,
+    )
+
     if not file.filename.lower().endswith(".pdf"):
+        logger.warning("extraction_rejected request_id=%s reason=unsupported_file", request_id)
         raise HTTPException(
             status_code=400, detail="Only PDF files are supported."
         )
@@ -374,6 +396,12 @@ async def extract_coordinates(
 
         # Open byte stream directly using PyMuPDF
         doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+        logger.info(
+            "pdf_opened request_id=%s bytes=%d pages=%d",
+            request_id,
+            len(pdf_bytes),
+            len(doc),
+        )
 
         for page_idx, page in enumerate(doc):
             rect = page.rect
@@ -381,17 +409,34 @@ async def extract_coordinates(
             # 1. High-precision word extraction via PyMuPDF
             # page.get_text("words") returns tuples: (x0, y0, x1, y1, word, block_no, line_no, word_no)
             raw_words = [] if force_ocr else page.get_text("words")
+            native_word_count = len(raw_words)
 
             # 1b. OCR fallback: run when forced, or when the page has no text layer
             # at all (scanned/image-only page or CAD text drawn as vector paths).
             used_ocr = False
             ocr_error = None
             if enable_ocr and (force_ocr or not raw_words):
+                ocr_started_at = time.perf_counter()
                 ocr_words, ocr_error = extract_words_via_ocr(page)
                 if ocr_words:
                     raw_words = ocr_words
                     used_ocr = True
-                elif force_ocr:
+                logger.info(
+                    "ocr_finished request_id=%s page=%d used_ocr=%s words=%d duration_seconds=%.2f",
+                    request_id,
+                    page_idx + 1,
+                    used_ocr,
+                    len(ocr_words),
+                    time.perf_counter() - ocr_started_at,
+                )
+                if ocr_error:
+                    logger.warning(
+                        "ocr_failed request_id=%s page=%d error=%s",
+                        request_id,
+                        page_idx + 1,
+                        ocr_error,
+                    )
+                if not ocr_words and force_ocr:
                     # OCR failed (e.g. Tesseract not installed) - fall back to any real text.
                     raw_words = page.get_text("words")
 
@@ -451,6 +496,19 @@ async def extract_coordinates(
                 x_gap_threshold=x_gap_threshold,
                 y_gap_threshold=y_gap_threshold,
             )
+            schedule_tables = build_schedule_tables(extracted_tables, spatial_grid)
+            storey_marking_schedule = build_storey_marking_pivot(spatial_grid)
+            logger.info(
+                "page_extracted request_id=%s page=%d native_words=%d output_words=%d tables=%d schedule_rows=%d pivot_rows=%d source=%s",
+                request_id,
+                page_idx + 1,
+                native_word_count,
+                len(words_data),
+                len(extracted_tables),
+                sum(len(table["rows"]) for table in schedule_tables),
+                len(storey_marking_schedule),
+                "ocr" if used_ocr else "text_layer",
+            )
 
             extracted_pages.append(
                 {
@@ -463,13 +521,21 @@ async def extract_coordinates(
                     "blocks": blocks_data,
                     "words": words_data,
                     "tables": extracted_tables,
-                    "schedule_tables": build_schedule_tables(extracted_tables, spatial_grid),
-                    "storey_marking_schedule": build_storey_marking_pivot(spatial_grid),
+                    "schedule_tables": schedule_tables,
+                    "storey_marking_schedule": storey_marking_schedule,
                     "spatial_grid": spatial_grid,
                 }
             )
 
         doc.close()
+        logger.info(
+            "extraction_completed request_id=%s filename=%s pages=%d words=%d duration_seconds=%.2f",
+            request_id,
+            file.filename,
+            len(extracted_pages),
+            sum(page["raw_words_count"] for page in extracted_pages),
+            time.perf_counter() - started_at,
+        )
 
         return {
             "status": "success",
@@ -479,6 +545,12 @@ async def extract_coordinates(
         }
 
     except Exception as e:
+        logger.exception(
+            "extraction_failed request_id=%s filename=%s duration_seconds=%.2f",
+            request_id,
+            file.filename,
+            time.perf_counter() - started_at,
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 

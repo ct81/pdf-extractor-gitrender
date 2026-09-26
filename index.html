@@ -119,6 +119,21 @@
     const file = e.target.files[0];
     if (!file) return;
 
+    const actionId = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+    const extractionStartedAt = performance.now();
+    const settings = {
+      xGap: document.getElementById('x-gap').value,
+      yGap: document.getElementById('y-gap').value,
+      enableOcr: document.getElementById('enable-ocr').checked,
+      forceOcr: document.getElementById('force-ocr').checked,
+    };
+    console.info('[pdf-extractor] upload_started', {
+      actionId,
+      filename: file.name,
+      sizeBytes: file.size,
+      ...settings,
+    });
+
     document.getElementById('upload-label').textContent = `Loaded File: ${file.name}`;
     statusDiv.textContent = "Uploading to Render Python API... (First cold start on free Render tier takes ~30s)";
 
@@ -131,7 +146,10 @@
 
     try {
       const response = await fetch(RENDER_API_URL, { method: "POST", body: formData });
-      if (!response.ok) throw new Error(`HTTP Error Status: ${response.status}`);
+      if (!response.ok) {
+        const responseBody = await response.text();
+        throw new Error(`HTTP ${response.status}: ${responseBody.slice(0, 500)}`);
+      }
 
       const result = await response.json();
       extractedData = result;
@@ -145,13 +163,37 @@
       const wordCount = result.pages.reduce((total, page) => total + page.raw_words_count, 0);
       const ocrPages = result.pages.filter((page) => page.used_ocr).length;
       const ocrIssue = result.pages.find((page) => page.ocr_error)?.ocr_error;
+      console.info('[pdf-extractor] extraction_completed', {
+        actionId,
+        filename: result.filename,
+        pageCount: result.total_pages,
+        wordCount,
+        ocrPages,
+        pivotRows: result.pages.reduce((total, page) => total + (page.storey_marking_schedule || []).length, 0),
+        elapsedMs: Math.round(performance.now() - extractionStartedAt),
+      });
       let message = `Success! Extracted ${wordCount} coordinate words across ${result.total_pages} page(s).`;
       if (ocrPages) message += ` OCR was used on ${ocrPages} scanned page(s).`;
       if (ocrIssue) message += ` OCR unavailable on the server: ${ocrIssue}`;
       statusDiv.textContent = message;
     } catch (err) {
+      console.error('[pdf-extractor] extraction_failed', {
+        actionId,
+        filename: file.name,
+        elapsedMs: Math.round(performance.now() - extractionStartedAt),
+        error: err,
+      });
       statusDiv.textContent = `Error: ${err.message}. Make sure your Render backend is deployed and active.`;
     }
+  });
+
+  ['x-gap', 'y-gap', 'enable-ocr', 'force-ocr'].forEach((id) => {
+    document.getElementById(id).addEventListener('change', (event) => {
+      console.info('[pdf-extractor] setting_changed', {
+        setting: id,
+        value: event.target.type === 'checkbox' ? event.target.checked : event.target.value,
+      });
+    });
   });
 
   function renderTable(data) {
@@ -182,7 +224,14 @@
   }
 
   pageSelect.addEventListener('change', () => {
-    if (extractedData) renderPageLayout(extractedData.pages[Number(pageSelect.value)]);
+    if (extractedData) {
+      const page = extractedData.pages[Number(pageSelect.value)];
+      console.info('[pdf-extractor] page_selected', {
+        pageNumber: page.page_number,
+        usedOcr: page.used_ocr,
+      });
+      renderPageLayout(page);
+    }
   });
 
   function renderPageLayout(page) {
@@ -289,8 +338,12 @@
   }
 
   exportBtn.addEventListener('click', () => {
-    if (!extractedData) return;
+    if (!extractedData) {
+      console.warn('[pdf-extractor] export_skipped', { reason: 'no_extraction_data' });
+      return;
+    }
 
+    const exportStartedAt = performance.now();
     const wb = XLSX.utils.book_new();
     const rawRows = [["Page", "Index", "Text", "X0_Left", "Top_Y", "X1_Right", "Bottom_Y", "Width", "Height", "Coordinate"]];
     const jsonRows = [["Page", "Index", "JSON_Record"]];
@@ -330,7 +383,16 @@
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(jsonRows), "JSON_Data");
 
     const filename = extractedData.filename.replace(/\.pdf$/i, '');
-    XLSX.writeFile(wb, `${filename}_Coordinates.xlsx`);
+    const exportFilename = `${filename}_Coordinates.xlsx`;
+    XLSX.writeFile(wb, exportFilename);
+    console.info('[pdf-extractor] export_completed', {
+      filename: exportFilename,
+      sheets: wb.SheetNames,
+      wordRows: rawRows.length - 1,
+      scheduleRows: scheduleRows.length - 1,
+      pivotRows: pivotRows.length - 1,
+      elapsedMs: Math.round(performance.now() - exportStartedAt),
+    });
   });
 </script>
 
