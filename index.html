@@ -21,13 +21,18 @@
     th, td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; white-space: pre-line; }
     th { background: var(--primary); color: white; position: sticky; top: 0; }
     tr:nth-child(even) { background: #f8fafc; }
+    h2 { margin: 26px 0 12px; color: var(--primary); font-size: 1.1rem; }
+    .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    select { padding: 7px 10px; border: 1px solid var(--border); border-radius: 4px; background: white; }
+    .page-frame { max-height: 560px; overflow: auto; border: 1px solid var(--border); background: #edf1f4; }
+    .page-frame svg { display: block; width: 100%; height: auto; max-height: 560px; margin: 0 auto; background: white; }
   </style>
 </head>
 <body>
 
 <div class="container">
   <h1>Python PDF Coordinate & CAD Schedule Extractor</h1>
-  <p>Upload a PDF drawing. The backend processes vector matrices via Python (FastAPI + pdfplumber) hosted on Render.</p>
+  <p>Upload a PDF drawing to extract text, coordinates, and schedule tables.</p>
 
   <div class="upload-zone" onclick="document.getElementById('pdf-file').click()">
     <span id="upload-label">📄 Click or Drag & Drop PDF File Here</span>
@@ -40,20 +45,41 @@
 
   <div id="status">Status: Waiting for PDF upload...</div>
 
+  <section>
+    <div class="section-heading">
+      <h2>Coordinate Layout</h2>
+      <select id="page-select" aria-label="Preview page" disabled></select>
+    </div>
+    <div class="page-frame"><svg id="page-layout" role="img" aria-label="PDF text reconstructed from word coordinates" viewBox="0 0 1 1"></svg></div>
+  </section>
+
+  <section>
+    <h2>Schedule Table by Storey and Marking</h2>
+    <div class="table-container">
+      <table id="schedule-table">
+        <thead><tr><th>Page</th><th>Table</th><th>Storey</th><th>Marking</th></tr></thead>
+        <tbody id="schedule-body"><tr><td colspan="4" style="text-align: center; padding: 20px;">No schedule data extracted yet.</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <h2>Word Coordinates</h2>
   <div class="table-container">
     <table>
       <thead>
         <tr>
+          <th>Page</th>
           <th>Word #</th>
           <th>Text String</th>
           <th>X0 (Left)</th>
           <th>Top (Y)</th>
           <th>X1 (Right)</th>
           <th>Bottom (Y)</th>
+          <th>Coordinate</th>
         </tr>
       </thead>
       <tbody id="table-body">
-        <tr><td colspan="6" style="text-align: center; padding: 20px;">Upload a PDF file to extract raw coordinates.</td></tr>
+        <tr><td colspan="8" style="text-align: center; padding: 20px;">Upload a PDF file to extract raw coordinates.</td></tr>
       </tbody>
     </table>
   </div>
@@ -67,6 +93,7 @@
   const fileInput = document.getElementById('pdf-file');
   const exportBtn = document.getElementById('export-btn');
   const statusDiv = document.getElementById('status');
+  const pageSelect = document.getElementById('page-select');
 
   fileInput.addEventListener('change', async (e) => {
     const file = e.target.files[0];
@@ -86,8 +113,12 @@
       extractedData = result;
 
       renderTable(result);
+      renderScheduleTable(result);
+      renderPageOptions(result);
+      renderPageLayout(result.pages[0]);
       exportBtn.disabled = false;
-      statusDiv.textContent = `Success! Extracted ${result.pages[0].raw_words_count} coordinate words across ${result.total_pages} page(s).`;
+      const wordCount = result.pages.reduce((total, page) => total + page.raw_words_count, 0);
+      statusDiv.textContent = `Success! Extracted ${wordCount} coordinate words across ${result.total_pages} page(s).`;
     } catch (err) {
       statusDiv.textContent = `Error: ${err.message}. Make sure your Render backend is deployed and active.`;
     }
@@ -96,47 +127,142 @@
   function renderTable(data) {
     const tbody = document.getElementById('table-body');
     tbody.innerHTML = '';
-    const words = data.pages[0].words;
-
-    words.slice(0, 150).forEach((w, idx) => {
+    data.pages.flatMap((page) => page.words.map((word) => ({ ...word, page_number: page.page_number })))
+      .slice(0, 150).forEach((word, idx) => {
       const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td>${idx + 1}</td>
-        <td><strong>${w.text}</strong></td>
-        <td>${w.x0}</td>
-        <td>${w.top}</td>
-        <td>${w.x1}</td>
-        <td>${w.bottom}</td>
-      `;
+      [word.page_number, idx + 1, word.text, word.x0, word.top, word.x1, word.bottom, word.coordinate]
+        .forEach((value) => {
+          const td = document.createElement('td');
+          td.textContent = value ?? '';
+          tr.appendChild(td);
+        });
       tbody.appendChild(tr);
     });
+  }
+
+  function renderPageOptions(data) {
+    pageSelect.replaceChildren();
+    data.pages.forEach((page, index) => {
+      const option = document.createElement('option');
+      option.value = index;
+      option.textContent = `Page ${page.page_number}`;
+      pageSelect.appendChild(option);
+    });
+    pageSelect.disabled = data.pages.length < 2;
+  }
+
+  pageSelect.addEventListener('change', () => {
+    if (extractedData) renderPageLayout(extractedData.pages[Number(pageSelect.value)]);
+  });
+
+  function renderPageLayout(page) {
+    const svg = document.getElementById('page-layout');
+    const namespace = 'http://www.w3.org/2000/svg';
+    svg.setAttribute('viewBox', `0 0 ${page.width} ${page.height}`);
+    svg.replaceChildren();
+
+    const background = document.createElementNS(namespace, 'rect');
+    background.setAttribute('width', page.width);
+    background.setAttribute('height', page.height);
+    background.setAttribute('fill', '#ffffff');
+    svg.appendChild(background);
+
+    page.words.forEach((word) => {
+      const text = document.createElementNS(namespace, 'text');
+      text.setAttribute('x', word.x0);
+      text.setAttribute('y', word.bottom);
+      text.setAttribute('font-size', Math.max(word.height * 0.85, 3));
+      text.setAttribute('fill', '#172b3a');
+      text.textContent = word.text;
+      const title = document.createElementNS(namespace, 'title');
+      title.textContent = word.coordinate;
+      text.appendChild(title);
+      svg.appendChild(text);
+    });
+  }
+
+  function renderScheduleTable(data) {
+    const tbody = document.getElementById('schedule-body');
+    const table = document.getElementById('schedule-table');
+    const scheduleTables = data.pages.flatMap((page) => (page.schedule_tables || []).map((item) => ({
+      page_number: page.page_number,
+      ...item,
+    })));
+    const sourceColumns = [...new Set(scheduleTables.flatMap((item) => item.headers || []))];
+    const columns = ['Page', 'Table', 'Storey', 'Marking', ...sourceColumns];
+    table.querySelector('thead').replaceChildren();
+    const headerRow = document.createElement('tr');
+    columns.forEach((column) => {
+      const th = document.createElement('th');
+      th.textContent = column;
+      headerRow.appendChild(th);
+    });
+    table.querySelector('thead').appendChild(headerRow);
+    tbody.replaceChildren();
+
+    scheduleTables.forEach((item) => {
+      item.rows.forEach((row) => {
+        const tr = document.createElement('tr');
+        const values = [item.page_number, item.table_number, row.storey, row.marking];
+        sourceColumns.forEach((column) => {
+          const index = item.headers.indexOf(column);
+          values.push(index >= 0 ? row.cells[index] : '');
+        });
+        values.forEach((value) => {
+          const td = document.createElement('td');
+          td.textContent = value ?? '';
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      });
+    });
+
+    if (!tbody.childElementCount) {
+      const tr = document.createElement('tr');
+      const td = document.createElement('td');
+      td.colSpan = columns.length;
+      td.textContent = 'No schedule rows detected in this PDF.';
+      td.style.textAlign = 'center';
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+    }
   }
 
   exportBtn.addEventListener('click', () => {
     if (!extractedData) return;
 
     const wb = XLSX.utils.book_new();
-    const words = extractedData.pages[0].words;
+    const rawRows = [["Page", "Index", "Text", "X0_Left", "Top_Y", "X1_Right", "Bottom_Y", "Width", "Height", "Coordinate"]];
+    const jsonRows = [["Page", "Index", "JSON_Record"]];
+    const scheduleTables = extractedData.pages.flatMap((page) => (page.schedule_tables || []).map((table) => ({
+      page_number: page.page_number,
+      ...table,
+    })));
+    const scheduleColumns = [...new Set(scheduleTables.flatMap((table) => table.headers || []))];
+    const scheduleRows = [["Page", "Table", "Storey", "Marking", "Source", ...scheduleColumns]];
 
-    // Sheet 1: Raw Coordinates
-    const matrix = [["Index", "Text", "X0_Left", "Top_Y", "X1_Right", "Bottom_Y", "Width", "Height"]];
-    words.forEach((w, idx) => {
-      matrix.push([idx + 1, w.text, w.x0, w.top, w.x1, w.bottom, w.width, w.height]);
+    extractedData.pages.forEach((page) => {
+      page.words.forEach((word, index) => {
+        rawRows.push([page.page_number, index + 1, word.text, word.x0, word.top, word.x1, word.bottom, word.width, word.height, word.coordinate]);
+        jsonRows.push([page.page_number, index + 1, JSON.stringify(word)]);
+      });
+    });
+    scheduleTables.forEach((table) => {
+        table.rows.forEach((row) => {
+          const cells = scheduleColumns.map((column) => {
+            const index = table.headers.indexOf(column);
+            return index >= 0 ? row.cells[index] : '';
+          });
+          scheduleRows.push([table.page_number, table.table_number, row.storey, row.marking, table.source, ...cells]);
+        });
     });
 
-    const wsRaw = XLSX.utils.aoa_to_sheet(matrix);
-    XLSX.utils.book_append_sheet(wb, wsRaw, "Raw_Coordinates");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rawRows), "Raw_Coordinates");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(scheduleRows), "Schedule_By_Storey");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(jsonRows), "JSON_Data");
 
-    // Sheet 2: JSON Records
-    const jsonRows = [["Row_ID", "JSON_Record"]];
-    words.forEach((w, idx) => {
-      jsonRows.push([idx + 1, JSON.stringify(w)]);
-    });
-
-    const wsJSON = XLSX.utils.aoa_to_sheet(jsonRows);
-    XLSX.utils.book_append_sheet(wb, wsJSON, "JSON_Data");
-
-    XLSX.writeFile(wb, `${extractedData.filename}_Python_Coordinates.xlsx`);
+    const filename = extractedData.filename.replace(/\.pdf$/i, '');
+    XLSX.writeFile(wb, `${filename}_Coordinates.xlsx`);
   });
 </script>
 

@@ -105,6 +105,92 @@ def build_dynamic_coordinate_matrix(
     }
 
 
+def build_schedule_tables(extracted_tables, spatial_grid):
+    """Normalize detected PDF tables and identify Storey and Marking columns."""
+    schedule_tables = []
+    for table_number, table in enumerate(extracted_tables, start=1):
+        rows = [[str(cell or "").strip() for cell in row] for row in table]
+        if not rows:
+            continue
+
+        header_index = 0
+        for row_index, row in enumerate(rows[:5]):
+            labels = [cell.lower() for cell in row]
+            if any("storey" in cell or "story" in cell or "floor" in cell for cell in labels):
+                header_index = row_index
+                break
+
+        headers = [cell or f"Column_{index + 1}" for index, cell in enumerate(rows[header_index])]
+        normalized_headers = [header.lower() for header in headers]
+        storey_index = next(
+            (index for index, header in enumerate(normalized_headers)
+             if "storey" in header or "story" in header or "floor" in header),
+            None,
+        )
+        marking_index = next(
+            (index for index, header in enumerate(normalized_headers)
+             if "marking" in header or "mark" in header),
+            None,
+        )
+
+        table_rows = []
+        for row in rows[header_index + 1:]:
+            if not any(row):
+                continue
+            cells = (row + [""] * len(headers))[:len(headers)]
+            table_rows.append({
+                "cells": cells,
+                "storey": cells[storey_index] if storey_index is not None else "",
+                "marking": cells[marking_index] if marking_index is not None else "",
+            })
+
+        schedule_tables.append({
+            "table_number": table_number,
+            "source": "pdf_table",
+            "headers": headers,
+            "rows": table_rows,
+        })
+
+    if not schedule_tables and spatial_grid["rows"]:
+        grid_rows = spatial_grid["rows"]
+        header_index = next(
+            (index for index, row in enumerate(grid_rows[:5])
+             if any("storey" in cell.lower() or "story" in cell.lower()
+                    or "floor" in cell.lower() or "mark" in cell.lower()
+                    for cell in row["cells"])),
+            0,
+        )
+        headers = [cell or f"Column_{index + 1}"
+                   for index, cell in enumerate(grid_rows[header_index]["cells"])]
+        normalized_headers = [header.lower() for header in headers]
+        storey_index = next(
+            (index for index, header in enumerate(normalized_headers)
+             if "storey" in header or "story" in header or "floor" in header),
+            None,
+        )
+        marking_index = next(
+            (index for index, header in enumerate(normalized_headers) if "mark" in header),
+            None,
+        )
+        table_rows = []
+        for row in grid_rows[header_index + 1:]:
+            cells = (row["cells"] + [""] * len(headers))[:len(headers)]
+            if any(cells):
+                table_rows.append({
+                    "cells": cells,
+                    "storey": cells[storey_index] if storey_index is not None else "",
+                    "marking": cells[marking_index] if marking_index is not None else "",
+                })
+        schedule_tables.append({
+            "table_number": 1,
+            "source": "coordinates",
+            "headers": headers,
+            "rows": table_rows,
+        })
+
+    return schedule_tables
+
+
 @app.post("/extract-coordinates")
 async def extract_coordinates(file: UploadFile = File(...)):
     if not file.filename.lower().endswith(".pdf"):
@@ -138,6 +224,7 @@ async def extract_coordinates(file: UploadFile = File(...)):
                         "bottom": round(y1, 2),
                         "width": round(x1 - x0, 2),
                         "height": round(y1 - y0, 2),
+                        "coordinate": f"({x0:.2f}, {y0:.2f})-({x1:.2f}, {y1:.2f})",
                         "block_no": block_no,
                         "line_no": line_no,
                     }
@@ -169,7 +256,7 @@ async def extract_coordinates(file: UploadFile = File(...)):
                 extracted_tables = (
                     [t.extract() for t in found_tables] if found_tables else []
                 )
-            except Attribute:
+            except Exception:
                 extracted_tables = []
 
             # 4. Construct dynamic spatial coordinate grid
@@ -184,6 +271,7 @@ async def extract_coordinates(file: UploadFile = File(...)):
                     "blocks": blocks_data,
                     "words": words_data,
                     "tables": extracted_tables,
+                    "schedule_tables": build_schedule_tables(extracted_tables, spatial_grid),
                     "spatial_grid": spatial_grid,
                 }
             )
