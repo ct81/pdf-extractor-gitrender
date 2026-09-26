@@ -406,14 +406,17 @@ async def extract_coordinates(
                         }
                     )
 
-            # 3. Extract built-in tables (requires PyMuPDF 1.23.0+)
-            try:
-                found_tables = page.find_tables()
-                extracted_tables = (
-                    [t.extract() for t in found_tables] if found_tables else []
-                )
-            except Exception:
-                extracted_tables = []
+            # Table detection scans PDF vector paths, which can exhaust small
+            # Render instances on CAD pages; OCR/grid output already handles those.
+            extracted_tables = []
+            if not used_ocr and len(raw_words) >= 100:
+                try:
+                    found_tables = page.find_tables()
+                    extracted_tables = (
+                        [t.extract() for t in found_tables] if found_tables else []
+                    )
+                except Exception:
+                    extracted_tables = []
 
             # 4. Construct dynamic spatial coordinate grid
             spatial_grid = build_dynamic_coordinate_matrix(
