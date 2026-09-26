@@ -371,17 +371,19 @@ async def extract_coordinates(
     y_gap_threshold: float = Form(8.0),
     enable_ocr: bool = Form(True),
     force_ocr: bool = Form(False),
+    enable_layout_analysis: bool = Form(False),
 ):
     request_id = uuid.uuid4().hex[:8]
     started_at = time.perf_counter()
     logger.info(
-        "extraction_started request_id=%s filename=%s x_gap=%.2f y_gap=%.2f enable_ocr=%s force_ocr=%s",
+        "extraction_started request_id=%s filename=%s x_gap=%.2f y_gap=%.2f enable_ocr=%s force_ocr=%s enable_layout_analysis=%s",
         request_id,
         file.filename,
         x_gap_threshold,
         y_gap_threshold,
         enable_ocr,
         force_ocr,
+        enable_layout_analysis,
     )
 
     if not file.filename.lower().endswith(".pdf"):
@@ -439,6 +441,39 @@ async def extract_coordinates(
                 if not ocr_words and force_ocr:
                     # OCR failed (e.g. Tesseract not installed) - fall back to any real text.
                     raw_words = page.get_text("words")
+
+            layout_regions = []
+            if enable_layout_analysis and native_word_count:
+                layout_started_at = time.perf_counter()
+                try:
+                    from pymupdf import layout as pymupdf_layout
+
+                    pymupdf_layout.activate()
+                    page.get_layout()
+                    layout_regions = [
+                        {
+                            "x0": round(region[0], 2),
+                            "top": round(region[1], 2),
+                            "x1": round(region[2], 2),
+                            "bottom": round(region[3], 2),
+                            "label": str(region[4]),
+                        }
+                        for region in (page.layout_information or [])
+                        if len(region) >= 5
+                    ]
+                    logger.info(
+                        "layout_analysis_completed request_id=%s page=%d regions=%d duration_seconds=%.2f",
+                        request_id,
+                        page_idx + 1,
+                        len(layout_regions),
+                        time.perf_counter() - layout_started_at,
+                    )
+                except Exception:
+                    logger.exception(
+                        "layout_analysis_failed request_id=%s page=%d",
+                        request_id,
+                        page_idx + 1,
+                    )
 
             words_data = []
             for w in raw_words:
@@ -518,6 +553,8 @@ async def extract_coordinates(
                     "raw_words_count": len(words_data),
                     "used_ocr": used_ocr,
                     "ocr_error": ocr_error,
+                    "layout_analysis_used": bool(layout_regions),
+                    "layout_regions": layout_regions,
                     "blocks": blocks_data,
                     "words": words_data,
                     "tables": extracted_tables,

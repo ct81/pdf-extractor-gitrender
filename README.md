@@ -33,4 +33,14 @@ real text layer at all, so PyMuPDF's normal text extraction returns nothing for 
   isn't installed, the API still responds normally with `used_ocr: false` and an `ocr_error`
   message on the affected page instead of failing the request.
 
+## Optional Page Layout Analysis
+
+The **PyMuPDF layout analysis** checkbox runs `pymupdf-layout` on pages with a native text layer.
+It returns labeled region bounding boxes in the `layout_regions` response field, the on-screen
+Page Layout Regions table, and the `Layout_Regions` Excel sheet. The option is off by default;
+loading the model used about 106 MB of additional resident memory in local testing. OCR-only
+pages are skipped because the analyzer reads PDF-native content, not the text recognized by
+Tesseract. Use it for text-rich PDFs where improved reading-order and region classification are
+useful, not as an OCR enhancement for scanned/vector-outline drawings.
+
 

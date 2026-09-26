@@ -44,6 +44,7 @@
     <label>Row gap (px) <input type="number" id="y-gap" value="8" min="1" style="width: 70px;"></label>
     <label><input type="checkbox" id="enable-ocr" checked> OCR scanned/image pages (slower)</label>
     <label><input type="checkbox" id="force-ocr"> Always OCR (ignore embedded text)</label>
+    <label><input type="checkbox" id="layout-analysis"> PyMuPDF layout analysis (extra memory; native text only)</label>
     <span style="font-size: 0.8rem; color: #666;">Lower the gap values for dense CAD schedules if storey rows or mark columns merge incorrectly, then re-upload.</span>
   </div>
 
@@ -59,6 +60,16 @@
       <select id="page-select" aria-label="Preview page" disabled></select>
     </div>
     <div class="page-frame"><svg id="page-layout" role="img" aria-label="PDF text reconstructed from word coordinates" viewBox="0 0 1 1"></svg></div>
+  </section>
+
+  <section>
+    <h2>Page Layout Regions</h2>
+    <div class="table-container">
+      <table>
+        <thead><tr><th>Page</th><th>Region Type</th><th>X0</th><th>Top</th><th>X1</th><th>Bottom</th></tr></thead>
+        <tbody id="layout-body"><tr><td colspan="6" style="text-align: center; padding: 20px;">Enable PyMuPDF layout analysis before extraction to inspect native-text page regions.</td></tr></tbody>
+      </table>
+    </div>
   </section>
 
   <section>
@@ -126,6 +137,7 @@
       yGap: document.getElementById('y-gap').value,
       enableOcr: document.getElementById('enable-ocr').checked,
       forceOcr: document.getElementById('force-ocr').checked,
+      layoutAnalysis: document.getElementById('layout-analysis').checked,
     };
     console.info('[pdf-extractor] upload_started', {
       actionId,
@@ -143,6 +155,7 @@
     formData.append("y_gap_threshold", document.getElementById('y-gap').value);
     formData.append("enable_ocr", document.getElementById('enable-ocr').checked);
     formData.append("force_ocr", document.getElementById('force-ocr').checked);
+    formData.append("enable_layout_analysis", document.getElementById('layout-analysis').checked);
 
     try {
       const response = await fetch(RENDER_API_URL, { method: "POST", body: formData });
@@ -155,6 +168,7 @@
       extractedData = result;
 
       renderTable(result);
+      renderLayoutRegions(result);
       renderScheduleTable(result);
       renderPivotTable(result);
       renderPageOptions(result);
@@ -169,6 +183,7 @@
         pageCount: result.total_pages,
         wordCount,
         ocrPages,
+        layoutRegions: result.pages.reduce((total, page) => total + (page.layout_regions || []).length, 0),
         pivotRows: result.pages.reduce((total, page) => total + (page.storey_marking_schedule || []).length, 0),
         elapsedMs: Math.round(performance.now() - extractionStartedAt),
       });
@@ -187,7 +202,7 @@
     }
   });
 
-  ['x-gap', 'y-gap', 'enable-ocr', 'force-ocr'].forEach((id) => {
+  ['x-gap', 'y-gap', 'enable-ocr', 'force-ocr', 'layout-analysis'].forEach((id) => {
     document.getElementById(id).addEventListener('change', (event) => {
       console.info('[pdf-extractor] setting_changed', {
         setting: id,
@@ -258,6 +273,36 @@
       text.appendChild(title);
       svg.appendChild(text);
     });
+  }
+
+  function renderLayoutRegions(data) {
+    const tbody = document.getElementById('layout-body');
+    tbody.replaceChildren();
+    const regions = data.pages.flatMap((page) => (page.layout_regions || []).map((region) => ({
+      page_number: page.page_number,
+      ...region,
+    })));
+
+    regions.forEach((region) => {
+      const tr = document.createElement('tr');
+      [region.page_number, region.label, region.x0, region.top, region.x1, region.bottom]
+        .forEach((value) => {
+          const td = document.createElement('td');
+          td.textContent = value ?? '';
+          tr.appendChild(td);
+        });
+      tbody.appendChild(tr);
+    });
+
+    if (!tbody.childElementCount) {
+      const tr = document.createElement('tr');
+      const td = document.createElement('td');
+      td.colSpan = 6;
+      td.textContent = 'No layout regions available. Analysis is opt-in and only runs on pages with native PDF text.';
+      td.style.textAlign = 'center';
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+    }
   }
 
   function renderScheduleTable(data) {
@@ -377,7 +422,15 @@
       });
     });
 
+    const layoutRows = [["Page", "Region_Type", "X0", "Top", "X1", "Bottom"]];
+    extractedData.pages.forEach((page) => {
+      (page.layout_regions || []).forEach((region) => {
+        layoutRows.push([page.page_number, region.label, region.x0, region.top, region.x1, region.bottom]);
+      });
+    });
+
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rawRows), "Raw_Coordinates");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(layoutRows), "Layout_Regions");
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(pivotRows), "Storey_Marking_Pivot");
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(scheduleRows), "Schedule_By_Storey");
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(jsonRows), "JSON_Data");

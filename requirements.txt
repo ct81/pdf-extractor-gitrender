@@ -3,6 +3,7 @@ uvicorn
 python-multipart
 pdfplumber
 PyMuPDF
+pymupdf-layout==1.28.2
 pandas
 openpyxl
 pytesseract
