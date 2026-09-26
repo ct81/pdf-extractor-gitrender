@@ -288,43 +288,70 @@ def build_storey_marking_pivot(spatial_grid):
 
 
 def extract_words_via_ocr(page, dpi=200, language="eng"):
-    """Render the page to an image and OCR it with Tesseract, mapping pixel
-    boxes back to PDF point coordinates. Used for scanned pages or for CAD
-    schedule text drawn as vector paths with no real text layer. Requires the
-    system tesseract-ocr binary + language data on PATH; returns an empty
-    result and the error message if OCR is unavailable.
-    """
+    """OCR overlapping grayscale page tiles and map word boxes to PDF points."""
+    scale = dpi / 72
+    page_rect = page.rect
+    tile_size = 900
+    overlap = 24
+    words = []
+
     try:
-        scale = dpi / 72
-        pix = page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False)
-        image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-        ocr_data = pytesseract.image_to_data(
-            image, lang=language, output_type=pytesseract.Output.DICT
-        )
+        y0 = page_rect.y0
+        while y0 < page_rect.y1:
+            y1 = min(y0 + tile_size, page_rect.y1)
+            x0 = page_rect.x0
+            while x0 < page_rect.x1:
+                x1 = min(x0 + tile_size, page_rect.x1)
+                core = pymupdf.Rect(x0, y0, x1, y1)
+                clip = pymupdf.Rect(
+                    max(page_rect.x0, x0 - overlap),
+                    max(page_rect.y0, y0 - overlap),
+                    min(page_rect.x1, x1 + overlap),
+                    min(page_rect.y1, y1 + overlap),
+                )
+                pix = page.get_pixmap(
+                    matrix=pymupdf.Matrix(scale, scale),
+                    clip=clip,
+                    colorspace=pymupdf.csGRAY,
+                    alpha=False,
+                )
+                image = Image.frombytes("L", [pix.width, pix.height], pix.samples)
+                ocr_data = pytesseract.image_to_data(
+                    image, lang=language, output_type=pytesseract.Output.DICT
+                )
+                image.close()
+
+                origin_x = pix.x / scale
+                origin_y = pix.y / scale
+                for i, text in enumerate(ocr_data["text"]):
+                    text = text.strip()
+                    if not text:
+                        continue
+                    left = origin_x + ocr_data["left"][i] / scale
+                    top = origin_y + ocr_data["top"][i] / scale
+                    right = left + ocr_data["width"][i] / scale
+                    bottom = top + ocr_data["height"][i] / scale
+                    center_x = (left + right) / 2
+                    center_y = (top + bottom) / 2
+                    if not (x0 <= center_x < x1 and y0 <= center_y < y1):
+                        continue
+                    words.append(
+                        (
+                            left,
+                            top,
+                            right,
+                            bottom,
+                            text,
+                            ocr_data["block_num"][i],
+                            ocr_data["line_num"][i],
+                            ocr_data["word_num"][i],
+                        )
+                    )
+                x0 = x1
+            y0 = y1
     except Exception as exc:
         return [], str(exc)
 
-    words = []
-    for i, text in enumerate(ocr_data["text"]):
-        text = text.strip()
-        if not text:
-            continue
-        left = ocr_data["left"][i] / scale
-        top = ocr_data["top"][i] / scale
-        right = left + ocr_data["width"][i] / scale
-        bottom = top + ocr_data["height"][i] / scale
-        words.append(
-            (
-                left,
-                top,
-                right,
-                bottom,
-                text,
-                ocr_data["block_num"][i],
-                ocr_data["line_num"][i],
-                ocr_data["word_num"][i],
-            )
-        )
     return words, None
 
 
