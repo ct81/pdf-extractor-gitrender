@@ -2,8 +2,10 @@ import io
 import re
 
 import fitz  # PyMuPDF
+import pytesseract
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from PIL import Image
 
 # Row-label tokens used to recognize a storey/level, e.g. "30TH", "1ST STY. FL. LVL",
 # "UPPER ROOF", "FOUNDATION BASE" — these drawings label storeys as ROW headers,
@@ -286,17 +288,44 @@ def build_storey_marking_pivot(spatial_grid):
 
 
 def extract_words_via_ocr(page, dpi=200, language="eng"):
-    """OCR fallback for scanned/image-only pages with no extractable text layer.
-    Requires the system Tesseract-OCR engine + language data (TESSDATA_PREFIX);
-    returns an empty result and the error message if OCR is unavailable.
+    """Render the page to an image and OCR it with Tesseract, mapping pixel
+    boxes back to PDF point coordinates. Used for scanned pages or for CAD
+    schedule text drawn as vector paths with no real text layer. Requires the
+    system tesseract-ocr binary + language data on PATH; returns an empty
+    result and the error message if OCR is unavailable.
     """
     try:
-        textpage = page.get_textpage_ocr(
-            flags=fitz.TEXTFLAGS_WORDS, full=True, dpi=dpi, language=language
+        scale = dpi / 72
+        pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+        image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        ocr_data = pytesseract.image_to_data(
+            image, lang=language, output_type=pytesseract.Output.DICT
         )
-        return page.get_text("words", textpage=textpage), None
     except Exception as exc:
         return [], str(exc)
+
+    words = []
+    for i, text in enumerate(ocr_data["text"]):
+        text = text.strip()
+        if not text:
+            continue
+        left = ocr_data["left"][i] / scale
+        top = ocr_data["top"][i] / scale
+        right = left + ocr_data["width"][i] / scale
+        bottom = top + ocr_data["height"][i] / scale
+        words.append(
+            (
+                left,
+                top,
+                right,
+                bottom,
+                text,
+                ocr_data["block_num"][i],
+                ocr_data["line_num"][i],
+                ocr_data["word_num"][i],
+            )
+        )
+    return words, None
 
 
 @app.post("/extract-coordinates")
@@ -305,6 +334,7 @@ async def extract_coordinates(
     x_gap_threshold: float = Form(35.0),
     y_gap_threshold: float = Form(8.0),
     enable_ocr: bool = Form(True),
+    force_ocr: bool = Form(False),
 ):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(
@@ -323,14 +353,20 @@ async def extract_coordinates(
 
             # 1. High-precision word extraction via PyMuPDF
             # page.get_text("words") returns tuples: (x0, y0, x1, y1, word, block_no, line_no, word_no)
-            raw_words = page.get_text("words")
+            raw_words = [] if force_ocr else page.get_text("words")
 
-            # 1b. OCR fallback for scanned/image-only pages with no text layer
+            # 1b. OCR fallback: run when forced, or when the page has no text layer
+            # at all (scanned/image-only page or CAD text drawn as vector paths).
             used_ocr = False
             ocr_error = None
-            if not raw_words and enable_ocr:
-                raw_words, ocr_error = extract_words_via_ocr(page)
-                used_ocr = bool(raw_words)
+            if enable_ocr and (force_ocr or not raw_words):
+                ocr_words, ocr_error = extract_words_via_ocr(page)
+                if ocr_words:
+                    raw_words = ocr_words
+                    used_ocr = True
+                elif force_ocr:
+                    # OCR failed (e.g. Tesseract not installed) - fall back to any real text.
+                    raw_words = page.get_text("words")
 
             words_data = []
             for w in raw_words:

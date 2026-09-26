@@ -5,3 +5,5 @@ pdfplumber
 PyMuPDF
 pandas
 openpyxl
+pytesseract
+Pillow
