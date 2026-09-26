@@ -1,7 +1,7 @@
 import io
 import re
 
-import fitz  # PyMuPDF
+import pymupdf  # PyMuPDF
 import pytesseract
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -296,7 +296,7 @@ def extract_words_via_ocr(page, dpi=200, language="eng"):
     """
     try:
         scale = dpi / 72
-        pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+        pix = page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False)
         image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
         ocr_data = pytesseract.image_to_data(
             image, lang=language, output_type=pytesseract.Output.DICT
@@ -346,7 +346,7 @@ async def extract_coordinates(
         extracted_pages = []
 
         # Open byte stream directly using PyMuPDF
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
 
         for page_idx, page in enumerate(doc):
             rect = page.rect
