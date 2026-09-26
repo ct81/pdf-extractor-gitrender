@@ -1,7 +1,23 @@
 import io
+import re
+
 import fitz  # PyMuPDF
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+
+# Row-label tokens used to recognize a storey/level, e.g. "30TH", "1ST STY. FL. LVL",
+# "UPPER ROOF", "FOUNDATION BASE" — these drawings label storeys as ROW headers,
+# not as a "Storey" table column, so plain header-name matching cannot find them.
+STOREY_TOKEN_RE = re.compile(
+    r"(\bGROUND\b|\bROOF\b|\bFOUNDATION\b|\bBASEMENT\b|\bMEZZ(ANINE)?\b|"
+    r"\bB\d{1,2}\b|\d{1,3}\s*(ST|ND|RD|TH)\b|\bSTOREY\b|\bSTY\b|\bLEVEL\b|"
+    r"\bLVL\b|\bTIER\b)",
+    re.IGNORECASE,
+)
+
+# Legend-row token used to find the row that lists column/beam/wall "MARKS",
+# whose other cells (not a header) hold the actual marking codes.
+MARK_LABEL_RE = re.compile(r"\bMARK", re.IGNORECASE)
 
 app = FastAPI(title="High-Precision Dynamic PDF Coordinates Extractor API")
 
@@ -191,8 +207,90 @@ def build_schedule_tables(extracted_tables, spatial_grid):
     return schedule_tables
 
 
+def build_storey_marking_pivot(spatial_grid):
+    """Reconstruct a Storey x Marking schedule directly from the word-coordinate
+    matrix. Many CAD/structural schedules place storeys as ROW labels and marks
+    as a legend ROW (e.g. "COLUMN MARKS" followed by codes in the other cells of
+    that same row) instead of using conventional column headers, so find_tables()
+    and header-name matching cannot detect them. This pivots row/column position
+    instead of relying on header text.
+    """
+    rows = spatial_grid.get("rows", [])
+    column_anchors = spatial_grid.get("column_anchors", [])
+    if not rows or not column_anchors:
+        return []
+
+    # 1. Find the marks legend row and forward-fill each column to its mark code,
+    #    since a mark label is often centered under only the first of several
+    #    columns that belong to it (merged cell in the source drawing).
+    marks_row = None
+    mark_label_column = None
+    for row in rows:
+        for col_idx, cell in enumerate(row["cells"]):
+            if cell and MARK_LABEL_RE.search(cell):
+                marks_row = row
+                mark_label_column = col_idx
+                break
+        if marks_row:
+            break
+
+    mark_by_column = {}
+    if marks_row:
+        last_mark = None
+        for col_idx, cell in enumerate(marks_row["cells"]):
+            if col_idx == mark_label_column:
+                continue
+            if cell:
+                last_mark = cell
+            if last_mark:
+                mark_by_column[col_idx] = last_mark
+
+    # 2. For every remaining row, detect a storey label anywhere in the row's
+    #    leading cells, then pair each data cell with its forward-filled mark.
+    pivot_rows = []
+    for row in rows:
+        if marks_row and row["row_id"] == marks_row["row_id"]:
+            continue
+
+        storey_label = None
+        storey_column = None
+        for col_idx, cell in enumerate(row["cells"]):
+            if cell and STOREY_TOKEN_RE.search(cell):
+                storey_label = cell
+                storey_column = col_idx
+                break
+
+        if storey_label is None:
+            continue
+
+        for col_idx, cell in enumerate(row["cells"]):
+            if col_idx == storey_column or not cell:
+                continue
+            x_anchor = column_anchors[col_idx] if col_idx < len(column_anchors) else None
+            pivot_rows.append(
+                {
+                    "storey": storey_label,
+                    "marking": mark_by_column.get(col_idx, ""),
+                    "value": cell,
+                    "row_id": row["row_id"],
+                    "column_index": col_idx,
+                    "y_top": row["y_top"],
+                    "x": x_anchor,
+                    "coordinate": (
+                        f"(x={x_anchor}, y={row['y_top']})" if x_anchor is not None else ""
+                    ),
+                }
+            )
+
+    return pivot_rows
+
+
 @app.post("/extract-coordinates")
-async def extract_coordinates(file: UploadFile = File(...)):
+async def extract_coordinates(
+    file: UploadFile = File(...),
+    x_gap_threshold: float = Form(35.0),
+    y_gap_threshold: float = Form(8.0),
+):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(
             status_code=400, detail="Only PDF files are supported."
@@ -260,7 +358,11 @@ async def extract_coordinates(file: UploadFile = File(...)):
                 extracted_tables = []
 
             # 4. Construct dynamic spatial coordinate grid
-            spatial_grid = build_dynamic_coordinate_matrix(words_data)
+            spatial_grid = build_dynamic_coordinate_matrix(
+                words_data,
+                x_gap_threshold=x_gap_threshold,
+                y_gap_threshold=y_gap_threshold,
+            )
 
             extracted_pages.append(
                 {
@@ -272,6 +374,7 @@ async def extract_coordinates(file: UploadFile = File(...)):
                     "words": words_data,
                     "tables": extracted_tables,
                     "schedule_tables": build_schedule_tables(extracted_tables, spatial_grid),
+                    "storey_marking_schedule": build_storey_marking_pivot(spatial_grid),
                     "spatial_grid": spatial_grid,
                 }
             )

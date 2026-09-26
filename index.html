@@ -39,6 +39,12 @@
     <input type="file" id="pdf-file" accept="application/pdf">
   </div>
 
+  <div style="margin-bottom: 20px; display: flex; gap: 16px; align-items: center; flex-wrap: wrap;">
+    <label>Column gap (px) <input type="number" id="x-gap" value="35" min="1" style="width: 70px;"></label>
+    <label>Row gap (px) <input type="number" id="y-gap" value="8" min="1" style="width: 70px;"></label>
+    <span style="font-size: 0.8rem; color: #666;">Lower these for dense CAD schedules if storey rows or mark columns merge incorrectly, then re-upload.</span>
+  </div>
+
   <div style="margin-bottom: 20px;">
     <button id="export-btn" class="btn" disabled>📥 Export Multi-Tab Excel (.xlsx)</button>
   </div>
@@ -59,6 +65,17 @@
       <table id="schedule-table">
         <thead><tr><th>Page</th><th>Table</th><th>Storey</th><th>Marking</th></tr></thead>
         <tbody id="schedule-body"><tr><td colspan="4" style="text-align: center; padding: 20px;">No schedule data extracted yet.</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Storey x Marking Pivot (row-label + legend-row schedules)</h2>
+    <p style="font-size: 0.85rem; color: #666; margin-top: -6px;">Reconstructed from word coordinates for CAD drawings that label storeys as row headers and marks as a legend row (e.g. "COLUMN MARKS").</p>
+    <div class="table-container">
+      <table id="pivot-table">
+        <thead><tr><th>Page</th><th>Storey</th><th>Marking</th><th>Value</th><th>Coordinate</th></tr></thead>
+        <tbody id="pivot-body"><tr><td colspan="5" style="text-align: center; padding: 20px;">No pivot data extracted yet.</td></tr></tbody>
       </table>
     </div>
   </section>
@@ -104,6 +121,8 @@
 
     const formData = new FormData();
     formData.append("file", file);
+    formData.append("x_gap_threshold", document.getElementById('x-gap').value);
+    formData.append("y_gap_threshold", document.getElementById('y-gap').value);
 
     try {
       const response = await fetch(RENDER_API_URL, { method: "POST", body: formData });
@@ -114,6 +133,7 @@
 
       renderTable(result);
       renderScheduleTable(result);
+      renderPivotTable(result);
       renderPageOptions(result);
       renderPageLayout(result.pages[0]);
       exportBtn.disabled = false;
@@ -228,6 +248,36 @@
     }
   }
 
+  function renderPivotTable(data) {
+    const tbody = document.getElementById('pivot-body');
+    tbody.replaceChildren();
+
+    const pivotRows = data.pages.flatMap((page) => (page.storey_marking_schedule || []).map((row) => ({
+      page_number: page.page_number,
+      ...row,
+    })));
+
+    pivotRows.forEach((row) => {
+      const tr = document.createElement('tr');
+      [row.page_number, row.storey, row.marking, row.value, row.coordinate].forEach((value) => {
+        const td = document.createElement('td');
+        td.textContent = value ?? '';
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+
+    if (!tbody.childElementCount) {
+      const tr = document.createElement('tr');
+      const td = document.createElement('td');
+      td.colSpan = 5;
+      td.textContent = 'No storey/marking pivot rows detected in this PDF. Try lowering the column/row gap values above.';
+      td.style.textAlign = 'center';
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+    }
+  }
+
   exportBtn.addEventListener('click', () => {
     if (!extractedData) return;
 
@@ -257,7 +307,15 @@
         });
     });
 
+    const pivotRows = [["Page", "Storey", "Marking", "Value", "Coordinate"]];
+    extractedData.pages.forEach((page) => {
+      (page.storey_marking_schedule || []).forEach((row) => {
+        pivotRows.push([page.page_number, row.storey, row.marking, row.value, row.coordinate]);
+      });
+    });
+
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rawRows), "Raw_Coordinates");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(pivotRows), "Storey_Marking_Pivot");
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(scheduleRows), "Schedule_By_Storey");
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(jsonRows), "JSON_Data");
 
