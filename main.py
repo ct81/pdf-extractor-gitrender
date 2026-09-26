@@ -296,6 +296,135 @@ def build_storey_marking_pivot(spatial_grid):
     return pivot_rows
 
 
+def build_detail_mark_schedule(words):
+    """Read a Detail Mark / Storey / Size / Reinforcement table by coordinates."""
+    if not words:
+        return []
+
+    sorted_words = sorted(words, key=lambda word: (word["top"], word["x0"]))
+    lines = []
+    for word in sorted_words:
+        tolerance = max(2.5, min(word["height"], 7.0) * 0.65)
+        line = next(
+            (candidate for candidate in reversed(lines)
+             if abs(candidate["top"] - word["top"]) <= tolerance),
+            None,
+        )
+        if line is None:
+            line = {"top": word["top"], "words": []}
+            lines.append(line)
+        line["words"].append(word)
+
+    header_index = None
+    columns = []
+    for line_index, line in enumerate(lines):
+        line_words = sorted(line["words"], key=lambda word: word["x0"])
+        header_groups = []
+        for word in line_words:
+            if not header_groups or word["x0"] - header_groups[-1][-1]["x1"] > 20:
+                header_groups.append([word])
+            else:
+                header_groups[-1].append(word)
+
+        columns = []
+        for group_index, group in enumerate(header_groups):
+            label = " ".join(word["text"] for word in group).strip(" :.-")
+            normalized = label.lower()
+            if "detail" in normalized and "mark" in normalized or normalized in {"mark", "marking"}:
+                key = "detail_mark"
+                label = "Detail Mark"
+            elif any(token in normalized for token in ("storey", "story", "floor", "level", "lvl")):
+                key = "storey"
+                label = "Storey"
+            elif "size" in normalized or "dimension" in normalized:
+                key = "size"
+                label = "Size"
+            elif any(token in normalized for token in ("reinforcement", "rebar", "reinforce")):
+                key = "reinforcement"
+                label = "Reinforcement"
+            else:
+                key = f"other_{group_index}"
+            columns.append({
+                "key": key,
+                "label": label,
+                "x": sum((word["x0"] + word["x1"]) / 2 for word in group) / len(group),
+                "x0": min(word["x0"] for word in group),
+                "x1": max(word["x1"] for word in group),
+            })
+
+        keys = {column["key"] for column in columns}
+        if not {"detail_mark", "storey", "size", "reinforcement"}.issubset(keys):
+            continue
+        header_index = line_index
+        break
+
+    if header_index is None:
+        return []
+
+    ordered_columns = sorted(columns, key=lambda item: item["x"])
+    boundaries = [
+        (ordered_columns[index]["x1"] + ordered_columns[index + 1]["x0"]) / 2
+        for index in range(len(ordered_columns) - 1)
+    ]
+    rows = []
+    active_mark = ""
+    for line in lines[header_index + 1:]:
+        cell_words = {column["key"]: [] for column in ordered_columns}
+        for word in sorted(line["words"], key=lambda item: item["x0"]):
+            center = (word["x0"] + word["x1"]) / 2
+            column_index = sum(center >= boundary for boundary in boundaries)
+            cell_words[ordered_columns[column_index]["key"]].append(word)
+
+        cells = {
+            name: " ".join(word["text"] for word in values).strip()
+            for name, values in cell_words.items()
+        }
+        if not any(cells.values()):
+            continue
+
+        detail_mark = cells["detail_mark"]
+        if detail_mark:
+            active_mark = detail_mark
+        storey = cells["storey"]
+        size = cells["size"]
+        reinforcement = cells["reinforcement"]
+        additional_data = {
+            column["label"]: cells[column["key"]]
+            for column in ordered_columns
+            if column["key"].startswith("other_") and cells[column["key"]]
+        }
+
+        if not (detail_mark or storey or size or reinforcement):
+            continue
+        if not storey and not size and not reinforcement:
+            continue
+
+        if not storey and not size and rows and reinforcement:
+            rows[-1]["reinforcement"] = " ".join(
+                value for value in (rows[-1]["reinforcement"], reinforcement) if value
+            )
+            continue
+
+        source_words = [word for values in cell_words.values() for word in values]
+        rows.append({
+            "detail_mark": active_mark,
+            "storey": storey,
+            "size": size,
+            "reinforcement": reinforcement,
+            "other": "; ".join(f"{key}: {value}" for key, value in additional_data.items()),
+            "additional_data": additional_data,
+            "source_text": " ".join(word["text"] for word in sorted(source_words, key=lambda item: item["x0"])),
+            "y_top": round(line["top"], 2),
+            "coordinate": (
+                f"({min(word['x0'] for word in source_words):.2f}, {line['top']:.2f})-"
+                f"({max(word['x1'] for word in source_words):.2f}, "
+                f"{max(word['bottom'] for word in source_words):.2f})"
+            ),
+        })
+
+    return rows
+
+
 def extract_words_via_ocr(page, dpi=200, language="eng"):
     """OCR overlapping grayscale page tiles and map word boxes to PDF points."""
     scale = dpi / 72
@@ -533,8 +662,9 @@ async def extract_coordinates(
             )
             schedule_tables = build_schedule_tables(extracted_tables, spatial_grid)
             storey_marking_schedule = build_storey_marking_pivot(spatial_grid)
+            detail_mark_schedule = build_detail_mark_schedule(words_data)
             logger.info(
-                "page_extracted request_id=%s page=%d native_words=%d output_words=%d tables=%d schedule_rows=%d pivot_rows=%d source=%s",
+                "page_extracted request_id=%s page=%d native_words=%d output_words=%d tables=%d schedule_rows=%d pivot_rows=%d detail_mark_rows=%d source=%s",
                 request_id,
                 page_idx + 1,
                 native_word_count,
@@ -542,6 +672,7 @@ async def extract_coordinates(
                 len(extracted_tables),
                 sum(len(table["rows"]) for table in schedule_tables),
                 len(storey_marking_schedule),
+                len(detail_mark_schedule),
                 "ocr" if used_ocr else "text_layer",
             )
 
@@ -560,6 +691,7 @@ async def extract_coordinates(
                     "tables": extracted_tables,
                     "schedule_tables": schedule_tables,
                     "storey_marking_schedule": storey_marking_schedule,
+                    "detail_mark_schedule": detail_mark_schedule,
                     "spatial_grid": spatial_grid,
                 }
             )

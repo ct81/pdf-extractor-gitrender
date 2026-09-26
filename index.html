@@ -83,6 +83,16 @@
   </section>
 
   <section>
+    <h2>Detail Mark Schedule</h2>
+    <div class="table-container">
+      <table id="detail-mark-table">
+        <thead><tr><th>Page</th><th>Detail Mark</th><th>Storey</th><th>Size</th><th>Reinforcement</th><th>Source Text</th><th>Coordinate</th></tr></thead>
+        <tbody id="detail-mark-body"><tr><td colspan="8" style="text-align: center; padding: 20px;">No detail mark rows extracted yet.</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
     <h2>Storey x Marking Pivot (row-label + legend-row schedules)</h2>
     <p style="font-size: 0.85rem; color: #666; margin-top: -6px;">Reconstructed from word coordinates for CAD drawings that label storeys as row headers and marks as a legend row (e.g. "COLUMN MARKS").</p>
     <div class="table-container">
@@ -170,6 +180,7 @@
       renderTable(result);
       renderLayoutRegions(result);
       renderScheduleTable(result);
+      renderDetailMarkTable(result);
       renderPivotTable(result);
       renderPageOptions(result);
       renderPageLayout(result.pages[0]);
@@ -185,6 +196,7 @@
         ocrPages,
         layoutRegions: result.pages.reduce((total, page) => total + (page.layout_regions || []).length, 0),
         pivotRows: result.pages.reduce((total, page) => total + (page.storey_marking_schedule || []).length, 0),
+        detailMarkRows: result.pages.reduce((total, page) => total + (page.detail_mark_schedule || []).length, 0),
         elapsedMs: Math.round(performance.now() - extractionStartedAt),
       });
       let message = `Success! Extracted ${wordCount} coordinate words across ${result.total_pages} page(s).`;
@@ -382,6 +394,48 @@
     }
   }
 
+  function renderDetailMarkTable(data) {
+    const tbody = document.getElementById('detail-mark-body');
+    const table = document.getElementById('detail-mark-table');
+    tbody.replaceChildren();
+    const rows = data.pages.flatMap((page) => (page.detail_mark_schedule || []).map((row) => ({
+      page_number: page.page_number,
+      ...row,
+    })));
+    const extraHeaders = [...new Set(rows.flatMap((row) => Object.keys(row.additional_data || {})))];
+    const headers = ['Page', 'Detail Mark', 'Storey', 'Size', 'Reinforcement', ...extraHeaders, 'Source Text', 'Coordinate'];
+    const headerRow = document.createElement('tr');
+    headers.forEach((header) => {
+      const th = document.createElement('th');
+      th.textContent = header;
+      headerRow.appendChild(th);
+    });
+    table.querySelector('thead').replaceChildren(headerRow);
+
+    rows.forEach((row) => {
+      const tr = document.createElement('tr');
+      const values = [row.page_number, row.detail_mark, row.storey, row.size, row.reinforcement];
+      extraHeaders.forEach((header) => values.push((row.additional_data || {})[header] || ''));
+      values.push(row.source_text, row.coordinate);
+      values.forEach((value) => {
+        const td = document.createElement('td');
+        td.textContent = value ?? '';
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+
+    if (!tbody.childElementCount) {
+      const tr = document.createElement('tr');
+      const td = document.createElement('td');
+      td.colSpan = headers.length;
+      td.textContent = 'No Detail Mark / Storey / Size / Reinforcement header row was detected.';
+      td.style.textAlign = 'center';
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+    }
+  }
+
   exportBtn.addEventListener('click', () => {
     if (!extractedData) {
       console.warn('[pdf-extractor] export_skipped', { reason: 'no_extraction_data' });
@@ -429,8 +483,30 @@
       });
     });
 
+    const detailSchedule = extractedData.pages.flatMap((page) => (page.detail_mark_schedule || []).map((row) => ({
+      page_number: page.page_number,
+      ...row,
+    })));
+    const detailExtraHeaders = [...new Set(detailSchedule.flatMap((row) => Object.keys(row.additional_data || {})))];
+    const detailMarkRows = [["Page", "Detail Mark", "Storey", "Size", "Reinforcement", ...detailExtraHeaders, "Source Text", "Coordinate"]];
+    extractedData.pages.forEach((page) => {
+      (page.detail_mark_schedule || []).forEach((row) => {
+        detailMarkRows.push([
+          page.page_number,
+          row.detail_mark,
+          row.storey,
+          row.size,
+          row.reinforcement,
+          ...detailExtraHeaders.map((header) => (row.additional_data || {})[header] || ''),
+          row.source_text,
+          row.coordinate,
+        ]);
+      });
+    });
+
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rawRows), "Raw_Coordinates");
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(layoutRows), "Layout_Regions");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(detailMarkRows), "Detail_Mark_Schedule");
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(pivotRows), "Storey_Marking_Pivot");
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(scheduleRows), "Schedule_By_Storey");
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(jsonRows), "JSON_Data");
@@ -444,6 +520,7 @@
       wordRows: rawRows.length - 1,
       scheduleRows: scheduleRows.length - 1,
       pivotRows: pivotRows.length - 1,
+      detailMarkRows: detailMarkRows.length - 1,
       elapsedMs: Math.round(performance.now() - exportStartedAt),
     });
   });
